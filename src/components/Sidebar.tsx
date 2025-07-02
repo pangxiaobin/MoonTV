@@ -13,6 +13,7 @@ import {
   Swords,
   Tv,
   VenetianMask,
+  PenTool,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
@@ -164,6 +165,8 @@ const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
     },
     { icon: MountainSnow, label: '日剧', href: '/douban?type=tv&tag=日剧' },
     { icon: VenetianMask, label: '日漫', href: '/douban?type=tv&tag=日本动画' },
+    { icon: 
+      , label: '灵象工具箱', href: 'https://www.lingxiangtools.top'},
   ];
 
   const { siteName } = useSite();
