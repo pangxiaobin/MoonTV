@@ -165,8 +165,7 @@ const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
     },
     { icon: MountainSnow, label: '日剧', href: '/douban?type=tv&tag=日剧' },
     { icon: VenetianMask, label: '日漫', href: '/douban?type=tv&tag=日本动画' },
-    { icon: 
-      , label: '灵象工具箱', href: 'https://www.lingxiangtools.top'},
+    { icon: PenTool, label: '灵象工具箱', href: 'https://www.lingxiangtools.top'},
   ];
 
   const { siteName } = useSite();
