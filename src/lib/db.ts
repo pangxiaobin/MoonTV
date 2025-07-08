@@ -1,4 +1,6 @@
-/* eslint-disable no-console, @typescript-eslint/no-explicit-any */
+/* eslint-disable no-console, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
+
+import { AdminConfig } from './admin.types';
 
 // storage type 常量: 'localstorage' | 'database'，默认 'localstorage'
 const STORAGE_TYPE =
@@ -58,9 +60,16 @@ export interface IStorage {
   checkUserExist(userName: string): Promise<boolean>;
 
   // 搜索历史相关
-  getSearchHistory(): Promise<string[]>;
-  addSearchHistory(keyword: string): Promise<void>;
-  deleteSearchHistory(keyword?: string): Promise<void>;
+  getSearchHistory(userName: string): Promise<string[]>;
+  addSearchHistory(userName: string, keyword: string): Promise<void>;
+  deleteSearchHistory(userName: string, keyword?: string): Promise<void>;
+
+  // 用户列表
+  getAllUsers(): Promise<string[]>;
+
+  // 管理员配置相关
+  getAdminConfig(): Promise<AdminConfig | null>;
+  setAdminConfig(config: AdminConfig): Promise<void>;
 }
 
 // ---------------- Redis 实现 ----------------
@@ -181,27 +190,56 @@ class RedisStorage implements IStorage {
   }
 
   // ---------- 搜索历史 ----------
-  private shKey = 'moontv:search_history';
-
-  async getSearchHistory(): Promise<string[]> {
-    return (await this.client.lRange(this.shKey, 0, -1)) as string[];
+  private shKey(user: string) {
+    return `u:${user}:sh`; // u:username:sh
   }
 
-  async addSearchHistory(keyword: string): Promise<void> {
+  async getSearchHistory(userName: string): Promise<string[]> {
+    return (await this.client.lRange(this.shKey(userName), 0, -1)) as string[];
+  }
+
+  async addSearchHistory(userName: string, keyword: string): Promise<void> {
+    const key = this.shKey(userName);
     // 先去重
-    await this.client.lRem(this.shKey, 0, keyword);
+    await this.client.lRem(key, 0, keyword);
     // 插入到最前
-    await this.client.lPush(this.shKey, keyword);
+    await this.client.lPush(key, keyword);
     // 限制最大长度
-    await this.client.lTrim(this.shKey, 0, SEARCH_HISTORY_LIMIT - 1);
+    await this.client.lTrim(key, 0, SEARCH_HISTORY_LIMIT - 1);
   }
 
-  async deleteSearchHistory(keyword?: string): Promise<void> {
+  async deleteSearchHistory(userName: string, keyword?: string): Promise<void> {
+    const key = this.shKey(userName);
     if (keyword) {
-      await this.client.lRem(this.shKey, 0, keyword);
+      await this.client.lRem(key, 0, keyword);
     } else {
-      await this.client.del(this.shKey);
+      await this.client.del(key);
     }
+  }
+
+  // ---------- 获取全部用户 ----------
+  async getAllUsers(): Promise<string[]> {
+    const keys = await this.client.keys('u:*:pwd');
+    return keys
+      .map((k) => {
+        const match = k.match(/^u:(.+?):pwd$/);
+        return match ? match[1] : undefined;
+      })
+      .filter((u): u is string => typeof u === 'string');
+  }
+
+  // ---------- 管理员配置 ----------
+  private adminConfigKey() {
+    return 'admin:config';
+  }
+
+  async getAdminConfig(): Promise<AdminConfig | null> {
+    const val = await this.client.get(this.adminConfigKey());
+    return val ? (JSON.parse(val) as AdminConfig) : null;
+  }
+
+  async setAdminConfig(config: AdminConfig): Promise<void> {
+    await this.client.set(this.adminConfigKey(), JSON.stringify(config));
   }
 }
 
@@ -357,16 +395,38 @@ export class DbManager {
   }
 
   // ---------- 搜索历史 ----------
-  async getSearchHistory(): Promise<string[]> {
-    return this.storage.getSearchHistory();
+  async getSearchHistory(userName: string): Promise<string[]> {
+    return this.storage.getSearchHistory(userName);
   }
 
-  async addSearchHistory(keyword: string): Promise<void> {
-    await this.storage.addSearchHistory(keyword);
+  async addSearchHistory(userName: string, keyword: string): Promise<void> {
+    await this.storage.addSearchHistory(userName, keyword);
   }
 
-  async deleteSearchHistory(keyword?: string): Promise<void> {
-    await this.storage.deleteSearchHistory(keyword);
+  async deleteSearchHistory(userName: string, keyword?: string): Promise<void> {
+    await this.storage.deleteSearchHistory(userName, keyword);
+  }
+
+  // 获取全部用户名
+  async getAllUsers(): Promise<string[]> {
+    if (typeof (this.storage as any).getAllUsers === 'function') {
+      return (this.storage as any).getAllUsers();
+    }
+    return [];
+  }
+
+  // ---------- 管理员配置 ----------
+  async getAdminConfig(): Promise<AdminConfig | null> {
+    if (typeof (this.storage as any).getAdminConfig === 'function') {
+      return (this.storage as any).getAdminConfig();
+    }
+    return null;
+  }
+
+  async saveAdminConfig(config: AdminConfig): Promise<void> {
+    if (typeof (this.storage as any).setAdminConfig === 'function') {
+      await (this.storage as any).setAdminConfig(config);
+    }
   }
 }
 
@@ -383,12 +443,33 @@ function getRedisClient(): RedisClientType {
     if (!url) {
       throw new Error('REDIS_URL env variable not set');
     }
-    client = createClient({ url });
 
-    // 提前连接，连接失败抛出错误便于定位
-    client.connect().catch((err: unknown) => {
-      console.error('Redis connection error:', err);
+    // 创建客户端，配置重连策略
+    client = createClient({
+      url,
+      socket: {
+        // 5秒重连间隔
+        reconnectStrategy: (retries: number) => {
+          console.log(`Redis reconnection attempt ${retries + 1}`);
+          return 5000; // 5秒后重试
+        },
+        connectTimeout: 10000, // 10秒连接超时
+      },
     });
+
+    // 初始连接，带重试机制
+    const connectWithRetry = async () => {
+      try {
+        await client!.connect();
+        console.log('Redis connected successfully');
+      } catch (err) {
+        console.error('Redis initial connection failed:', err);
+        console.log('Will retry in 5 seconds...');
+        setTimeout(connectWithRetry, 5000);
+      }
+    };
+
+    connectWithRetry();
 
     (global as any)[globalKey] = client;
   }
